@@ -1,0 +1,96 @@
+import os
+import re
+import json
+import subprocess
+import matplotlib.pyplot as plt
+
+from Bio import Entrez
+from Bio import SeqIO
+from Bio import Phylo
+from Bio.Align.Applications import MuscleCommandline
+from Bio.Phylo.Applications import PhymlCommandline
+
+
+#Определяем интересующие нас штаммы
+#Перечисляем названия организмов и штаммы, для которых хотим строить дерево (штамм можно не указывать)
+
+# Археи
+organisms = [ # (organism, strain)
+    ('Archaeoglobus fulgidus', 'VC-16'),
+    ('Ignicoccus hospitalis', 'KIN4/I'),
+    ('Methanocaldococcus jannaschii', 'JCM 10045'),
+    ('Methanococcus maripaludis', 'JJ'),
+    ('Decoy', 'junk'),    # Такого в базах точно нет, скрипт отработает с предупреждением
+    ('Pyrobaculum aerophilum', 'IM2'),
+    ('Pyrobaculum calidifontis', 'VA1'),
+    ('Pyrococcus horikoshii', 'JA-1'),
+    ('Sulfolobus tokodaii', '7'),
+]
+
+# Бактерии
+outgroup = [
+    ('Desulfovibrio piger', 'ATCC 29098'),
+    ('Herpetosiphon aurantiacus', ''),
+    ('Rhodopirellula baltica', 'SH 1'),
+]
+#Получение данных из RefSeq
+# 16S RefSeq Nucleotide sequence records
+# https://www.ncbi.nlm.nih.gov/refseq/targetedloci/16S_process/
+REFSEQ_16S_RNA_TERM = '33175[BioProject] OR 33317[BioProject]'    # Курируемая база 16S РНК бактерий и архей (очень хорошая)
+
+# Задаем имена файлов
+RAW_SEQ_FILENAME = '16S_sequences.fasta'    # файл с сырыми последовательностями
+ALIGNEMENT_FILENAME = '16S_sequences_aligned.fasta'    # файл с выравниваниями
+BLOCKS_FILENAME = '16S_sequences_blocks.phylip'    # файл с очищенными выравниваниями
+ML_TREE_NAME = 'Bacteria_MLTree.newick'    # файл с деревом
+In [4]:
+full_names = {} # словарь с полными именами
+taxonomy = {} # словарь с таксономией
+
+with open(RAW_SEQ_FILENAME, 'w') as output_handle:    # открываем файл в режиме записи
+    for organism, strain in organisms + outgroup:    # итерируемся по объединенному списку организмов (организмы + аутгруппа)
+        
+        # Запрос к базе данных
+        query = f'"{organism}"[Organism]' # "название организма"[Strain]
+        if strain:
+            query += f' AND "{strain}"[Strain]'
+        
+        # Выполняем поиск
+        handle = Entrez.esearch(db='nucleotide',    # база данных поиска
+                                term=f'({REFSEQ_16S_RNA_TERM}) AND ({query})',    # запрос к базе
+                                sort='Date Modified')    # сортируем по свежести
+        record = Entrez.read(handle)    # преобразуем handle в читаемый вид
+        
+        # Проверка на то, нашлось ли что-либо по запросу
+        if int(record["Count"]) == 0:
+            print(f'!!!\nWarning! No items found for {organism} {strain}\n')
+            continue
+        
+        # Выбираем самый свежий результат и получаем последовательность
+        seq_id = record['IdList'][0]    # берем самый свежий результат
+        handle = Entrez.efetch(db='nucleotide',     # достаём (база данных поиска
+                               id=seq_id,    # айдишник, получен строчкой выше
+                               rettype="fasta")    # тип ответа)
+        seq = SeqIO.read(handle, format='fasta')
+               
+        # Проверка на соответствие результата запросу
+        if not (re.search(organism, seq.description) and re.search(strain, seq.description)):
+            # если не (нашлось имя организма в результате и нашлось имя штамма в результате):
+            print(f'!!!\nWarning! For "{organism} {strain}" was find just\n  {seq.description}\n')
+            continue
+        
+        # Для верификации результата получим таксономические данные
+        handle = Entrez.efetch(db='nucleotide', 
+                               id=seq_id,
+                               rettype="gb",
+                               retmode='xml')
+        taxonomy[seq.id] = Entrez.read(handle)[0]['GBSeq_taxonomy']    # запоминаем таксон по айдишнику чтобы в конце верифицировать дерево
+        
+        # В ходе обработки будем использовать короткие имена
+        full_names[seq.id] = seq.description
+        print(f'For        "{organism} {strain}" was retrieved:\n{seq.description}\n')
+        seq.description = ''
+        
+        # Записываем последовательность в файл
+        SeqIO.write(seq, output_handle, "fasta")
+        
